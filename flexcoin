@@ -1,0 +1,240 @@
+--=====================================================================
+--  FLEX UGC CODES :: PLAYTIME COIN FARMER
+--  Milestones: 10 / 20 / 30 min. Race the payout, don't wait politely.
+--=====================================================================
+if not game:IsLoaded() then game.Loaded:Wait() end
+local Players = game:GetService("Players")
+local RS      = game:GetService("ReplicatedStorage")
+local UIS     = game:GetService("UserInputService")
+local LP      = Players.LocalPlayer
+
+local CFG = {
+    Milestones = { 600, 1200, 1800 },
+    RaceCount  = 25,     -- fires per burst (all in one frame)
+    DripCount  = 15,     -- slow fallback bursts
+    DripDelay  = 0.4,
+}
+
+local BALANCE  = nil
+local LAST_BAL = 0
+local CLAIMS   = {}      -- captured claim remote(s) + args
+local ARMED    = false
+local AUTO     = true    -- auto-race at milestones
+local SESSION  = os.clock()
+
+local FUZZ = {
+    {1},{2},{3},{10},{20},{30},{600},{1200},{1800},
+    {"10"},{"20"},{"30"},{"minute"},{"reward"},{true},
+}
+
+local function fire(r, args)
+    pcall(function()
+        if r:IsA("RemoteFunction") then
+            r:InvokeServer(table.unpack(args or {}))
+        else
+            r:FireServer(table.unpack(args or {}))
+        end
+    end)
+end
+
+---------------------------------------------------------------------
+-- capture
+---------------------------------------------------------------------
+local function arm()
+    if ARMED then return end
+    ARMED = true
+    local old
+    old = hookmetamethod(game, "__namecall", function(self, ...)
+        local m = getnamecallmethod()
+        if (m == "FireServer" or m == "InvokeServer")
+           and typeof(self) == "Instance"
+           and (self:IsA("RemoteEvent") or self:IsA("RemoteFunction")) then
+            local args = { ... }
+            local known = false
+            for _, c in ipairs(CLAIMS) do if c.r == self then known = true end end
+            if not known then
+                table.insert(CLAIMS, { r = self, args = args })
+                print(("[Playtime] captured %s(%d args)"):format(self:GetFullName(), #args))
+            end
+        end
+        return old(self, ...)
+    end)
+    print("[Playtime] hook armed")
+end
+
+---------------------------------------------------------------------
+-- balance watch
+---------------------------------------------------------------------
+local function findBalance()
+    for _, root in ipairs({ LP, LP:FindFirstChild("leaderstats"), RS }) do
+        if root then
+            local ok, list = pcall(function() return root:GetDescendants() end)
+            if ok then
+                for _, o in ipairs(list) do
+                    if o:IsA("ValueBase") and typeof(o.Value) == "number" then
+                        local n = string.lower(o.Name)
+                        if string.find(n,"coin",1,true) or string.find(n,"balance",1,true)
+                           or string.find(n,"cash",1,true) then
+                            return o
+                        end
+                    end
+                end
+            end
+        end
+    end
+end
+
+local function watch()
+    BALANCE = findBalance()
+    if not BALANCE then return false end
+    LAST_BAL = BALANCE.Value
+    BALANCE.Changed:Connect(function(v)
+        if typeof(v) ~= "number" then return end
+        local d = v - LAST_BAL
+        LAST_BAL = v
+        if d > 0 then
+            print(("[Playtime] +%d coins (total %d)"):format(d, v))
+            if AUTO and #CLAIMS > 0 then
+                -- a grant landed: immediately try to stack more on top of it
+                task.delay(0.15, function() burst() end)
+            end
+        end
+    end)
+    print("[Playtime] balance locked: " .. BALANCE:GetFullName())
+    return true
+end
+
+---------------------------------------------------------------------
+-- race
+---------------------------------------------------------------------
+local function burst()
+    if #CLAIMS == 0 then print("[Playtime] nothing captured yet"); return end
+    for _, c in ipairs(CLAIMS) do
+        if c.r:IsA("RemoteFunction") then
+            for _ = 1, CFG.RaceCount do task.spawn(fire, c.r, c.args) end
+        else
+            for _ = 1, CFG.RaceCount do fire(c.r, c.args) end
+        end
+    end
+    print(("[Playtime] burst x%d"):format(CFG.RaceCount))
+end
+
+local function drip()
+    if #CLAIMS == 0 then print("[Playtime] nothing captured yet"); return end
+    task.spawn(function()
+        for _ = 1, CFG.DripCount do
+            for _, c in ipairs(CLAIMS) do fire(c.r, c.args) end
+            task.wait(CFG.DripDelay)
+        end
+        print("[Playtime] drip done")
+    end)
+end
+
+local function fuzz()
+    if #CLAIMS == 0 then print("[Playtime] capture a claim first"); return end
+    task.spawn(function()
+        for _, shape in ipairs(FUZZ) do
+            for _, c in ipairs(CLAIMS) do fire(c.r, shape) end
+            task.wait(0.15)
+        end
+        print("[Playtime] arg fuzz done")
+    end)
+end
+
+---------------------------------------------------------------------
+-- milestone clock + anti-afk
+---------------------------------------------------------------------
+task.spawn(function()
+    local nextIdx = 1
+    while true do
+        task.wait(1)
+        local el = os.clock() - SESSION
+        if nextIdx <= #CFG.Milestones and el >= CFG.Milestones[nextIdx] then
+            local m = CFG.Milestones[nextIdx] / 60
+            nextIdx = nextIdx + 1
+            print(("[Playtime] %d min reached"):format(m))
+            if AUTO and #CLAIMS > 0 then burst() end
+        end
+    end
+end)
+
+LP.Idled:Connect(function()
+    pcall(function()
+        game:GetService("VirtualUser"):CaptureController()
+        game:GetService("VirtualUser"):ClickButton2(Vector2.new())
+    end)
+end)
+
+---------------------------------------------------------------------
+-- GUI
+---------------------------------------------------------------------
+local pg = LP:WaitForChild("PlayerGui")
+if pg:FindFirstChild("PlaytimeFarmer") then pg.PlaytimeFarmer:Destroy() end
+local sg = Instance.new("ScreenGui")
+sg.Name = "PlaytimeFarmer"
+sg.ResetOnSpawn = false
+sg.Parent = pg
+
+local f = Instance.new("Frame")
+f.Size = UDim2.new(0, 230, 0, 250)
+f.Position = UDim2.new(0, 24, 0, 150)
+f.BackgroundColor3 = Color3.fromRGB(14, 14, 18)
+f.BorderSizePixel = 0
+f.Active = true
+f.Draggable = true
+f.Parent = sg
+Instance.new("UICorner", f).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", f).Color = Color3.fromRGB(55, 55, 65)
+
+local h = Instance.new("TextLabel")
+h.Size = UDim2.new(1, 0, 0, 30)
+h.BackgroundTransparency = 1
+h.Font = Enum.Font.GothamBold
+h.TextSize = 12
+h.TextColor3 = Color3.fromRGB(255, 200, 70)
+h.Text = "PLAYTIME FARMER"
+h.Parent = f
+
+local clock = Instance.new("TextLabel")
+clock.Size = UDim2.new(1, -20, 0, 22)
+clock.Position = UDim2.new(0, 10, 0, 30)
+clock.BackgroundTransparency = 1
+clock.Font = Enum.Font.Code
+clock.TextSize = 12
+clock.TextXAlignment = Enum.TextXAlignment.Left
+clock.TextColor3 = Color3.fromRGB(140, 140, 155)
+clock.Text = "session 00:00 | claims 0"
+clock.Parent = f
+
+task.spawn(function()
+    while true do
+        task.wait(1)
+        local e = math.floor(os.clock() - SESSION)
+        clock.Text = ("session %02d:%02d | claims %d"):format(e // 60, e % 60, #CLAIMS)
+    end
+end)
+
+local y = 56
+local function btn(t, c, cb)
+    local b = Instance.new("TextButton")
+    b.Size = UDim2.new(1, -20, 0, 28)
+    b.Position = UDim2.new(0, 10, 0, y)
+    b.BackgroundColor3 = c
+    b.BorderSizePixel = 0
+    b.Font = Enum.Font.GothamSemibold
+    b.TextSize = 11
+    b.TextColor3 = Color3.new(1,1,1)
+    b.Text = t
+    b.Parent = f
+    Instance.new("UICorner", b).CornerRadius = UDim.new(0, 6)
+    b.MouseButton1Click:Connect(function() pcall(cb) end)
+    y = y + 32
+end
+
+btn("Arm + lock balance", Color3.fromRGB(40, 90, 150), function() arm(); watch() end)
+btn("RACE claim now (x25)", Color3.fromRGB(150, 60, 130), burst)
+btn("Drip claim (slow)", Color3.fromRGB(90, 70, 130), drip)
+btn("Fuzz arguments", Color3.fromRGB(70, 90, 60), fuzz)
+btn("Toggle auto-race", Color3.fromRGB(50, 50, 60), function()
+    AUTO = not AUTO; print("[Playtime] auto-race " .. (AUTO and "ON" or "OFF"))
+end)
